@@ -4,10 +4,12 @@
 #include <fstream>
 #include <algorithm>
 #include <climits>
+#include <cmath>
 
 using namespace std;
 
-const size_t VECTOR_SIZE = 10000000;
+size_t SCALE = 5;
+size_t VECTOR_SIZE = 0;
 
 mt19937 rng;
 
@@ -131,10 +133,19 @@ vector<int> GenerateRandomSwaps(){
 //Progama recebe seed como argumento de entrada, caso não receba usa default 1
 int main(int argc, char* argv[]){
     //Código Gerado por IA - Início
+    
+    if (argc > 1) {
+        try {
+            SCALE = static_cast<size_t>(stoul(argv[1]));
+        } catch (const exception& e) {
+            cerr << "Entrada inválida: " << e.what() << endl;
+            return 1;
+        }
+    }
+    VECTOR_SIZE = static_cast<size_t>(pow(10, SCALE));
     unsigned int seed = 1;
-
-    if (argc > 1)
-        seed = static_cast<unsigned int>(stoul(argv[1]));
+    if (argc > 2)
+        seed = static_cast<unsigned int>(stoul(argv[2]));
     //Código Gerado por IA - Fim
     //Salva Seed
     rng.seed(seed);

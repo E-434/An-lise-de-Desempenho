@@ -5,6 +5,8 @@
 #include <chrono>
 #include <algorithm>
 #include <sstream>
+#include <thread>
+#include <atomic>
 
 using namespace std;
 using namespace std::chrono;
@@ -34,9 +36,45 @@ vector<int> loadVector(const string& filename)
     return vec;
 }
 
+//pega a memoria usada no momento que a função é chamada
+size_t getCurrentMemoryKB()
+{
+    ifstream file("/proc/self/status");
+    string line;
+    while (getline(file, line))
+    {
+        if (line.find("VmRSS:") == 0)
+        {
+            stringstream ss(line);
+            string key;
+            size_t valueKB;
+            string unit;
+            ss >> key >> valueKB >> unit;
+            return valueKB;
+        }
+    }
+    return 0;
+}
+
+//Pega a media de memoria usada no programa
+size_t getAvgMemoryUsageKB(atomic<bool>& running)
+{
+    size_t total = 0;
+    size_t count = 0;
+
+    while (running)
+    {
+        total += getCurrentMemoryKB();
+        count++;
+        this_thread::sleep_for(chrono::milliseconds(10)); // amostra a cada 10ms
+    }
+
+    return count > 0 ? (total / count) : 0;
+}
+
 //Pega Pico do uso de RAM
 //Não verificado ainda, mantido como comentário por enquanto
-/*size_t getPeakMemoryUsageMB()
+size_t getPeakMemoryUsageKB()
 {
     ifstream file("/proc/self/status");
 
@@ -54,30 +92,24 @@ vector<int> loadVector(const string& filename)
 
             ss >> key >> valueKB >> unit;
 
-            return valueKB / 1024;
+            return valueKB;
         }
     }
 
-}*/
+    return 0; // não encontrado
+}
 
 //Pega Energia usada pelo processo
 //Não verificado ainda, mantido como comentário
-/*double readEnergyJoules()
+double readEnergyJoules()
 {
-    //Ajustar de acordo com o sistema Linux usado
-    ifstream file("/sys/class/powercap/intel-rapl:0/energy_uj");
-
-    if (!file)
-    {
-        return -1.0;
-    }
+    ifstream file("/sys/class/powercap/intel-rapl/intel-rapl:0/energy_uj");
+    if (!file) return -1.0;
 
     long long microJoules;
-
     file >> microJoules;
-
     return microJoules / 1e6;
-}*/
+}
 
 //Fim do código gerado por IA
 
@@ -191,58 +223,51 @@ void mergeSort(vector<int>& arr, int left, int right){
 
 //Quicksort
 //Pivô mediana
-int medianOfThree(vector<int>& arr, int low, int high)
-{
+int medianOfThree(vector<int>& arr, int low, int high) {
     int mid = low + (high - low) / 2;
 
-    if (arr[low] > arr[mid])
-        swap(arr[low], arr[mid]);
+    int a = arr[low], b = arr[mid], c = arr[high];
 
-    if (arr[low] > arr[high])
-        swap(arr[low], arr[high]);
-
-    if (arr[mid] > arr[high])
-        swap(arr[mid], arr[high]);
-
-    swap(arr[mid], arr[high]);
-
-    return arr[high];
+    if ((a <= b && b <= c) || (c <= b && b <= a)) return b;
+    if ((b <= a && a <= c) || (c <= a && a <= b)) return a;
+    return c;
 }
 
-//Partição do quicksort
-int partition(vector<int>& arr, int low, int high) {
-  
-    //Pivô
-    int pivot = medianOfThree(arr, low, high);
-  
-    //Última posição fora do range
-    int i = low - 1;
-
-    //Move todos elementos menores que o pivô para sua esquerda
-    for (int j = low; j <= high - 1; j++) {
-        if (arr[j] < pivot) {
-            i++;
-            swap(arr[i], arr[j]);
-        }
+bool testCorrectness(vector<int>& original)
+{
+    size_t max = original.size();
+    for(size_t i = 0; i < max - 1; i++)
+    {
+        if(original[i] > original[i+1]) return false;
     }
-    
-    //PivÔ vai para a posição logo depois de elementos menores que ele e retorna sua posição
-    swap(arr[i + 1], arr[high]);  
-    return i + 1;
+    return true;
 }
+
 
 //Quicksort main
 void quickSort(vector<int>& arr, int low, int high) {
-  
-    if (low < high) {
-      
-        //Index da última partição
-        int pi = partition(arr, low, high);
+    if (low >= high) return;
 
-        //Chamada recursiva para os dois lados do pivÔ
-        quickSort(arr, low, pi - 1);
-        quickSort(arr, pi + 1, high);
+    int pivot = medianOfThree(arr, low, high);
+
+    int lt = low;
+    int gt = high;
+    int i  = low;
+
+    while (i <= gt) {
+        if (arr[i] < pivot) {
+            swap(arr[lt], arr[i]);
+            lt++; i++;
+        } else if (arr[i] > pivot) {
+            swap(arr[i], arr[gt]);
+            gt--;
+        } else {
+            i++;
+        }
     }
+
+    quickSort(arr, low, lt - 1);
+    quickSort(arr, gt + 1, high);
 }
 
 //Escrita do benchmark em um .CSV
@@ -252,12 +277,14 @@ struct Result
 {
     string vectorType;
     string algorithm;
+    size_t size;
 
     double timeMs;
 
     string stress;
 
-    size_t ramMB;
+    size_t ramMBmax;
+    size_t ramMBmedia;
 
     double energyJ;
 };
@@ -267,9 +294,11 @@ void writeCSV(ofstream& csv, const Result& r)
     csv
         << r.vectorType << ","
         << r.algorithm << ","
+        << r.size<< ","
         << r.timeMs << ","
         << r.stress << ","
-        << r.ramMB << ","
+        << r.ramMBmax << ","
+        << r.ramMBmedia << ","
         << r.energyJ
         << "\n";
 }
@@ -286,6 +315,9 @@ int main(int argc, char* argv[])
 
         return 1;
     }
+
+    atomic<bool> monitoring(true);
+
     //Salva entradas
     string algorithm = argv[1];
     string datasetPath = argv[2];
@@ -314,9 +346,18 @@ int main(int argc, char* argv[])
 
     vector<int> original = loadVector(datasetPath);
 
+    cout << algorithm << " " << datasetName << " " << original.size() << endl;
+
     //Energia, não testada, desativada
     //double energyBefore = readEnergyJoules();
 
+    size_t avgRam = 0;
+
+    thread monitorThread([&]() {
+        avgRam = getAvgMemoryUsageKB(monitoring);
+    });
+
+    double energyBefore = readEnergyJoules();
     //Começa tempo
     auto start = high_resolution_clock::now();
 
@@ -336,18 +377,30 @@ int main(int argc, char* argv[])
     //Termina tempo
     auto end = high_resolution_clock::now();
 
+    double energyAfter = readEnergyJoules();
+
+    monitoring = false;
+    monitorThread.join();
+    
+    
+
+    if(!testCorrectness(original)) 
+    {
+        cout << "Algoritmo não funcionou corretamente" << endl;
+        return -1;
+    }
     //double energyAfter = readEnergyJoules();
 
     //Tempo total = tempo depois - tempo antes
     double timeMs = duration<double, milli>(end - start).count();
 
     //Arquivo .csv
-    ofstream csv("results/results.csv", ios::app);
+    ofstream csv_alg("results/" + algorithm + ".csv", ios::app);
 
     //Header csv
-    if (csv.tellp() == 0)
+    if (csv_alg.tellp() == 0)
     {
-        csv << "vector_type,algorithm,time_ms,stress,ram_mb,energy_j\n";
+        csv_alg << "vector_type,algorithm,size,time_ms,stress,ram_kb_max,ram_kb_media,energy_j\n";
     }
 
     //Struct de resultado
@@ -363,13 +416,35 @@ int main(int argc, char* argv[])
         r.algorithm = "QuickSort";
 
     r.timeMs = timeMs;
+    r.size = original.size();
     r.stress = "None";
-    r.ramMB = 0;
-    r.energyJ = 0.0;
+    r.ramMBmax = getPeakMemoryUsageKB(); 
+    r.ramMBmedia = avgRam;
+    r.energyJ = (energyAfter >= 0 && energyBefore >= 0) ? energyAfter - energyBefore : -1.0;
     //Escreve csv
-    writeCSV(csv, r);
+    writeCSV(csv_alg, r);
 
-    csv.close();
+    csv_alg.close();
+
+    ofstream csv_data("results/" + datasetName + ".csv", ios::app);
+    //Header csv
+    if (csv_data.tellp() == 0)
+    {
+        csv_data << "vector_type,algorithm,size,time_ms,stress,ram_kb_max,ram_kb_media,energy_j\n";
+    }
+
+    writeCSV(csv_data, r);
+    csv_data.close();
+
+    ofstream csv_size("results/" + to_string(r.size) + ".csv", ios::app);
+    //Header csv
+    if (csv_size.tellp() == 0)
+    {
+        csv_size << "vector_type,algorithm,size,time_ms,stress,ram_kb_max,ram_kb_media,energy_j\n";
+    }
+
+    writeCSV(csv_size, r);
+    csv_size.close();
 
     cout << "Benchmark finalizado." << endl;
 
