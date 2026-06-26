@@ -8,7 +8,7 @@
 
 using namespace std;
 
-size_t SCALE = 5;
+size_t SCALE = 4;
 size_t VECTOR_SIZE = 0;
 
 mt19937 rng;

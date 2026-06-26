@@ -7,6 +7,8 @@
 #include <sstream>
 #include <thread>
 #include <atomic>
+#include <cstdlib>
+#include <ctime>
 
 using namespace std;
 using namespace std::chrono;
@@ -223,7 +225,7 @@ void mergeSort(vector<int>& arr, int left, int right){
 
 //Quicksort
 //Pivô mediana
-int medianOfThree(vector<int>& arr, int low, int high) {
+/*int medianOfThree(vector<int>& arr, int low, int high) {
     int mid = low + (high - low) / 2;
 
     int a = arr[low], b = arr[mid], c = arr[high];
@@ -231,6 +233,18 @@ int medianOfThree(vector<int>& arr, int low, int high) {
     if ((a <= b && b <= c) || (c <= b && b <= a)) return b;
     if ((b <= a && a <= c) || (c <= a && a <= b)) return a;
     return c;
+}*/
+
+int medianOfThree(vector<int>& arr, int low, int high) {
+    int mid = low + (high - low) / 2;
+
+    if (arr[low] > arr[mid])  swap(arr[low], arr[mid]);
+    if (arr[low] > arr[high]) swap(arr[low], arr[high]);
+    if (arr[mid] > arr[high]) swap(arr[mid], arr[high]);
+
+    // mediana agora em arr[mid]; move para arr[high-1] como âncora
+    swap(arr[mid], arr[high - 1]);
+    return arr[high - 1];
 }
 
 bool testCorrectness(vector<int>& original)
@@ -245,7 +259,7 @@ bool testCorrectness(vector<int>& original)
 
 
 //Quicksort main
-void quickSort(vector<int>& arr, int low, int high) {
+/*void quickSort(vector<int>& arr, int low, int high) {
     if (low >= high) return;
 
     int pivot = medianOfThree(arr, low, high);
@@ -268,6 +282,35 @@ void quickSort(vector<int>& arr, int low, int high) {
 
     quickSort(arr, low, lt - 1);
     quickSort(arr, gt + 1, high);
+}*/
+int partition(vector<int>& arr, int low, int high) {
+    int mid = low + (high - low) / 2;  // evita overflow vs (low+high)/2
+    swap(arr[mid], arr[high]);          // move o pivô pro final
+
+    int pivot = arr[high];
+    int i = low - 1;
+
+    for (int j = low; j < high; j++) {
+        if (arr[j] == pivot && rand() % 2 != 0) {
+            i++;
+            swap(arr[i], arr[j]);
+        }
+        else if (arr[j] < pivot) {
+            i++;
+            swap(arr[i], arr[j]);
+        }
+    }
+
+    swap(arr[i + 1], arr[high]);
+    return i + 1;
+}
+
+void quickSort(vector<int>& arr, int low, int high) {
+    if (low < high) {
+        int pi = partition(arr, low, high);
+        quickSort(arr, low, pi - 1);
+        quickSort(arr, pi + 1, high);
+    }
 }
 
 //Escrita do benchmark em um .CSV
