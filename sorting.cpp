@@ -9,9 +9,13 @@
 #include <atomic>
 #include <cstdlib>
 #include <ctime>
+#include <cctype>
+#include <stdexcept>
+#include <filesystem>
 
 using namespace std;
 using namespace std::chrono;
+namespace fs = std::filesystem;
 
 //Função que carrega os vetores salvos na pasta datasets como .bins
 //Início do código criado por IA
@@ -74,8 +78,7 @@ size_t getAvgMemoryUsageKB(atomic<bool>& running)
     return count > 0 ? (total / count) : 0;
 }
 
-//Pega Pico do uso de RAM
-//Não verificado ainda, mantido como comentário por enquanto
+//Usa Pico do uso de RAM
 size_t getPeakMemoryUsageKB()
 {
     ifstream file("/proc/self/status");
@@ -101,8 +104,7 @@ size_t getPeakMemoryUsageKB()
     return 0; // não encontrado
 }
 
-//Pega Energia usada pelo processo
-//Não verificado ainda, mantido como comentário
+//Verifica Energia usada pelo processo
 double readEnergyJoules()
 {
     ifstream file("/sys/class/powercap/intel-rapl/intel-rapl:0/energy_uj");
@@ -113,7 +115,133 @@ double readEnergyJoules()
     return microJoules / 1e6;
 }
 
-//Fim do código gerado por IA
+
+//Nível de estresse a ser aplicado durante o sorting
+//Inicio do código criado por IA
+enum class StressLevel {
+    None,
+    Cpu,
+    Ram,
+    Both
+};
+
+//Converte a entrada do usuário para o enum de estresse
+StressLevel parseStressLevel(const string& value)
+{
+    string normalized;
+    normalized.reserve(value.size());
+
+    for (char c : value)
+    {
+        normalized.push_back(static_cast<char>(tolower(static_cast<unsigned char>(c))));
+    }
+
+    if (normalized == "none" || normalized == "nenhum" || normalized == "sem" || normalized == "semestresse")
+        return StressLevel::None;
+
+    if (normalized == "cpu" || normalized == "processador")
+        return StressLevel::Cpu;
+
+    if (normalized == "ram" || normalized == "memoria" || normalized == "memória")
+        return StressLevel::Ram;
+
+    if (normalized == "both" || normalized == "ambos" || normalized == "cpu+ram")
+        return StressLevel::Both;
+
+    throw invalid_argument("Nível de estresse inválido. Use: none, cpu, ram ou both.");
+}
+
+//Converte o enum de estresse para string para salvar no CSV
+string stressLevelToString(StressLevel level)
+{
+    switch (level)
+    {
+        case StressLevel::None: return "none";
+        case StressLevel::Cpu: return "cpu";
+        case StressLevel::Ram: return "ram";
+        case StressLevel::Both: return "both";
+    }
+
+    return "none";
+}
+
+//Aplica estresse em CPU enquanto o sorting estiver sendo executado
+void runCpuStress(atomic<bool>& running)
+{
+    volatile unsigned long long value = 0;
+
+    while (running)
+    {
+        for (int i = 0; i < 10000 && running; ++i)
+        {
+            value += static_cast<unsigned long long>(i);
+        }
+    }
+}
+
+//Aplica estresse em RAM enquanto o sorting estiver sendo executado
+void runRamStress(atomic<bool>& running)
+{
+    constexpr size_t chunkSize = 64 * 1024 * 1024;
+    vector<unsigned char> buffer(chunkSize, 0);
+    size_t index = 0;
+
+    while (running)
+    {
+        buffer[index % chunkSize] = static_cast<unsigned char>((buffer[index % chunkSize] + 1) & 0xFF);
+        index = (index + 17) % chunkSize;
+    }
+}
+
+//Inicia as threads de estresse conforme o nível escolhido
+void startStress(StressLevel level, atomic<bool>& running, vector<thread>& workers)
+{
+    if (level == StressLevel::None)
+        return;
+
+    if (level == StressLevel::Cpu || level == StressLevel::Both)
+    {
+        workers.emplace_back([&]() {
+            runCpuStress(running);
+        });
+    }
+
+    if (level == StressLevel::Ram || level == StressLevel::Both)
+    {
+        workers.emplace_back([&]() {
+            runRamStress(running);
+        });
+    }
+}
+
+//Para as threads de estresse ao final da execução do sorting
+void stopStress(vector<thread>& workers, atomic<bool>& running)
+{
+    running = false;
+
+    for (thread& worker : workers)
+    {
+        if (worker.joinable())
+            worker.join();
+    }
+
+    workers.clear();
+}
+//Fim do código criado por IA
+//Estrutura para armazenar estatísticas do sorting
+struct SortingStats
+{
+    size_t comparisons = 0;
+    size_t swaps = 0;
+};
+
+SortingStats g_stats;
+
+void resetStats()
+{
+    g_stats.comparisons = 0;
+    g_stats.swaps = 0;
+}
 
 //Algoritmo de heapsort
 //Heapify sub-árvore com raiz i
@@ -129,15 +257,24 @@ void heapify(vector<int>& arr, int n, int i){
     int r = 2 * i + 2;
 
     //Se filho da esquerda, for maior que o maior número
-    if (l < n && arr[l] > arr[largest])
-        largest = l;
+    if (l < n)
+    {
+        g_stats.comparisons++;
+        if (arr[l] > arr[largest])
+            largest = l;
+    }
 
     //Se filho da direita, for maior que o maior número
-    if (r < n && arr[r] > arr[largest])
-        largest = r;
+    if (r < n)
+    {
+        g_stats.comparisons++;
+        if (arr[r] > arr[largest])
+            largest = r;
+    }
 
     // Se maior não é a raiz
     if (largest != i) {
+        g_stats.swaps++;
         swap(arr[i], arr[largest]);
 
         //Reorganiza recursivamente
@@ -157,6 +294,7 @@ void heapSort(vector<int>& arr){
     for (int i = n - 1; i > 0; i--) {
 
         //Mova raiz atual para o fim
+        g_stats.swaps++;
         swap(arr[0], arr[i]);
 
         //Chame heapify no restante
@@ -185,6 +323,7 @@ void merge(vector<int>& arr, int left, int mid, int right){
 
     //Faz o merge dos vetores temporários
     while (i < n1 && j < n2) {
+        g_stats.comparisons++;
         if (L[i] <= R[j]) {
             arr[k] = L[i];
             i++;
@@ -224,28 +363,7 @@ void mergeSort(vector<int>& arr, int left, int right){
 }
 
 //Quicksort
-//Pivô mediana
-/*int medianOfThree(vector<int>& arr, int low, int high) {
-    int mid = low + (high - low) / 2;
 
-    int a = arr[low], b = arr[mid], c = arr[high];
-
-    if ((a <= b && b <= c) || (c <= b && b <= a)) return b;
-    if ((b <= a && a <= c) || (c <= a && a <= b)) return a;
-    return c;
-}*/
-
-int medianOfThree(vector<int>& arr, int low, int high) {
-    int mid = low + (high - low) / 2;
-
-    if (arr[low] > arr[mid])  swap(arr[low], arr[mid]);
-    if (arr[low] > arr[high]) swap(arr[low], arr[high]);
-    if (arr[mid] > arr[high]) swap(arr[mid], arr[high]);
-
-    // mediana agora em arr[mid]; move para arr[high-1] como âncora
-    swap(arr[mid], arr[high - 1]);
-    return arr[high - 1];
-}
 
 bool testCorrectness(vector<int>& original)
 {
@@ -257,50 +375,34 @@ bool testCorrectness(vector<int>& original)
     return true;
 }
 
-
-//Quicksort main
-/*void quickSort(vector<int>& arr, int low, int high) {
-    if (low >= high) return;
-
-    int pivot = medianOfThree(arr, low, high);
-
-    int lt = low;
-    int gt = high;
-    int i  = low;
-
-    while (i <= gt) {
-        if (arr[i] < pivot) {
-            swap(arr[lt], arr[i]);
-            lt++; i++;
-        } else if (arr[i] > pivot) {
-            swap(arr[i], arr[gt]);
-            gt--;
-        } else {
-            i++;
-        }
-    }
-
-    quickSort(arr, low, lt - 1);
-    quickSort(arr, gt + 1, high);
-}*/
 int partition(vector<int>& arr, int low, int high) {
     int mid = low + (high - low) / 2;  // evita overflow vs (low+high)/2
+    g_stats.swaps++;
     swap(arr[mid], arr[high]);          // move o pivô pro final
 
     int pivot = arr[high];
     int i = low - 1;
 
     for (int j = low; j < high; j++) {
-        if (arr[j] == pivot && rand() % 2 != 0) {
-            i++;
-            swap(arr[i], arr[j]);
+        g_stats.comparisons++;
+        if (arr[j] == pivot) {
+            if (rand() % 2 != 0) {
+                i++;
+                g_stats.swaps++;
+                swap(arr[i], arr[j]);
+            }
         }
-        else if (arr[j] < pivot) {
-            i++;
-            swap(arr[i], arr[j]);
+        else {
+            g_stats.comparisons++;
+            if (arr[j] < pivot) {
+                i++;
+                g_stats.swaps++;
+                swap(arr[i], arr[j]);
+            }
         }
     }
 
+    g_stats.swaps++;
     swap(arr[i + 1], arr[high]);
     return i + 1;
 }
@@ -330,6 +432,8 @@ struct Result
     size_t ramMBmedia;
 
     double energyJ;
+    size_t comparisons;
+    size_t swaps;
 };
 
 void writeCSV(ofstream& csv, const Result& r)
@@ -342,7 +446,9 @@ void writeCSV(ofstream& csv, const Result& r)
         << r.stress << ","
         << r.ramMBmax << ","
         << r.ramMBmedia << ","
-        << r.energyJ
+        << r.energyJ << ","
+        << r.comparisons << ","
+        << r.swaps
         << "\n";
 }
 
@@ -351,10 +457,11 @@ void writeCSV(ofstream& csv, const Result& r)
 int main(int argc, char* argv[])
 {
     //Verifica entrada correta
-    if (argc != 3)
+    if (argc != 3 && argc != 4)
     {
-        cerr << "Uso: ./sorts <algoritmo> <arquivo_bin>" << endl;
+        cerr << "Uso: ./sorts <algoritmo> <arquivo_bin> [nivel_estresse]" << endl;
         cerr << "Algoritmos válidos: heap, merge, quick" << endl;
+        cerr << "Níveis de estresse válidos: none, cpu, ram, both" << endl;
 
         return 1;
     }
@@ -364,18 +471,23 @@ int main(int argc, char* argv[])
     //Salva entradas
     string algorithm = argv[1];
     string datasetPath = argv[2];
+    StressLevel stressLevel = StressLevel::None;
 
-    string datasetName = datasetPath;
-    //Acha .bin com vetor
-    size_t slashPos = datasetName.find_last_of("/");
+    if (argc == 4)
+    {
+        try
+        {
+            stressLevel = parseStressLevel(argv[3]);
+        }
+        catch (const exception& e)
+        {
+            cerr << e.what() << endl;
+            return 1;
+        }
+    }
 
-    if (slashPos != string::npos)
-        datasetName = datasetName.substr(slashPos + 1);
-
-    size_t dotPos = datasetName.find(".");
-
-    if (dotPos != string::npos)
-        datasetName = datasetName.substr(0, dotPos);
+    fs::path datasetFsPath(datasetPath);
+    string datasetName = datasetFsPath.stem().string();
     //Verifica algoritmo
     if (
         algorithm != "heap" &&
@@ -389,12 +501,15 @@ int main(int argc, char* argv[])
 
     vector<int> original = loadVector(datasetPath);
 
-    cout << algorithm << " " << datasetName << " " << original.size() << endl;
+    resetStats();
 
-    //Energia, não testada, desativada
-    //double energyBefore = readEnergyJoules();
+    cout << algorithm << " " << datasetName << " " << original.size() << endl;
+    cout << "Estresse: " << stressLevelToString(stressLevel) << endl;
 
     size_t avgRam = 0;
+    vector<thread> stressThreads;
+
+    startStress(stressLevel, monitoring, stressThreads);
 
     thread monitorThread([&]() {
         avgRam = getAvgMemoryUsageKB(monitoring);
@@ -423,27 +538,26 @@ int main(int argc, char* argv[])
     double energyAfter = readEnergyJoules();
 
     monitoring = false;
+    stopStress(stressThreads, monitoring);
     monitorThread.join();
-    
-    
 
     if(!testCorrectness(original)) 
     {
         cout << "Algoritmo não funcionou corretamente" << endl;
         return -1;
     }
-    //double energyAfter = readEnergyJoules();
 
     //Tempo total = tempo depois - tempo antes
     double timeMs = duration<double, milli>(end - start).count();
 
     //Arquivo .csv
-    ofstream csv_alg("results/" + algorithm + ".csv", ios::app);
+    fs::path csvAlgPath = fs::path("results") / (algorithm + ".csv");
+    bool writeHeaderAlg = !fs::exists(csvAlgPath) || fs::file_size(csvAlgPath) == 0;
+    ofstream csv_alg(csvAlgPath, ios::app);
 
-    //Header csv
-    if (csv_alg.tellp() == 0)
+    if (writeHeaderAlg)
     {
-        csv_alg << "vector_type,algorithm,size,time_ms,stress,ram_kb_max,ram_kb_media,energy_j\n";
+        csv_alg << "vector_type,algorithm,size,time_ms,stress,ram_kb_max,ram_kb_media,energy_j,comparisons,swaps\n";
     }
 
     //Struct de resultado
@@ -457,33 +571,39 @@ int main(int argc, char* argv[])
         r.algorithm = "MergeSort";
     else
         r.algorithm = "QuickSort";
-
+    //Salva resultados
     r.timeMs = timeMs;
     r.size = original.size();
-    r.stress = "None";
+    r.stress = stressLevelToString(stressLevel);
+    r.comparisons = g_stats.comparisons;
+    r.swaps = g_stats.swaps;
+    //Salva RAM usada
     r.ramMBmax = getPeakMemoryUsageKB(); 
     r.ramMBmedia = avgRam;
+    //Cálculo de energia usada, caso não seja possível pegar energia, retorna -1.0
     r.energyJ = (energyAfter >= 0 && energyBefore >= 0) ? energyAfter - energyBefore : -1.0;
     //Escreve csv
     writeCSV(csv_alg, r);
 
     csv_alg.close();
 
-    ofstream csv_data("results/" + datasetName + ".csv", ios::app);
-    //Header csv
-    if (csv_data.tellp() == 0)
+    fs::path csvDataPath = fs::path("results") / (datasetName + ".csv");
+    bool writeHeaderData = !fs::exists(csvDataPath) || fs::file_size(csvDataPath) == 0;
+    ofstream csv_data(csvDataPath, ios::app);
+    if (writeHeaderData)
     {
-        csv_data << "vector_type,algorithm,size,time_ms,stress,ram_kb_max,ram_kb_media,energy_j\n";
+        csv_data << "vector_type,algorithm,size,time_ms,stress,ram_kb_max,ram_kb_media,energy_j,comparisons,swaps\n";
     }
 
     writeCSV(csv_data, r);
     csv_data.close();
 
-    ofstream csv_size("results/" + to_string(r.size) + ".csv", ios::app);
-    //Header csv
-    if (csv_size.tellp() == 0)
+    fs::path csvSizePath = fs::path("results") / (to_string(r.size) + ".csv");
+    bool writeHeaderSize = !fs::exists(csvSizePath) || fs::file_size(csvSizePath) == 0;
+    ofstream csv_size(csvSizePath, ios::app);
+    if (writeHeaderSize)
     {
-        csv_size << "vector_type,algorithm,size,time_ms,stress,ram_kb_max,ram_kb_media,energy_j\n";
+        csv_size << "vector_type,algorithm,size,time_ms,stress,ram_kb_max,ram_kb_media,energy_j,comparisons,swaps\n";
     }
 
     writeCSV(csv_size, r);
