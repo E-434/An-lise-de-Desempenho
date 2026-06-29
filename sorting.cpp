@@ -166,30 +166,48 @@ string stressLevelToString(StressLevel level)
 }
 
 //Aplica estresse em CPU enquanto o sorting estiver sendo executado
-void runCpuStress(atomic<bool>& running)
+void runCpuStress(std::atomic<bool>& running)
 {
-    volatile unsigned long long value = 0;
+    volatile double x = 1.1;
 
     while (running)
     {
-        for (int i = 0; i < 10000 && running; ++i)
-        {
-            value += static_cast<unsigned long long>(i);
-        }
+        //Executa operações aritméticas simples para consumir CPU durante o sorting
+        x *= 1.0000001;
+        x /= 1.00000009;
+        x += 0.1234;
+        x -= 0.5678;
+        x *= 1.0000003;
+        x /= 1.0000002;
+        x += x * 0.000001;
     }
 }
 
 //Aplica estresse em RAM enquanto o sorting estiver sendo executado
-void runRamStress(atomic<bool>& running)
+void runRamStress(std::atomic<bool>& running)
 {
-    constexpr size_t chunkSize = 64 * 1024 * 1024;
-    vector<unsigned char> buffer(chunkSize, 0);
-    size_t index = 0;
+    constexpr size_t chunkSize = 512ULL * 1024ULL * 1024ULL;
+    constexpr size_t mask = chunkSize - 1;
+
+    std::vector<unsigned char> buffer(chunkSize, 0);
+
+    uint64_t state = 0x123456789ABCDEFULL;
+    unsigned char value = 0;
 
     while (running)
     {
-        buffer[index % chunkSize] = static_cast<unsigned char>((buffer[index % chunkSize] + 1) & 0xFF);
-        index = (index + 17) % chunkSize;
+        //Realiza leituras e escritas em um buffer grande para aumentar o uso de RAM
+        for (int i = 0; i < 8; i++)
+        {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+
+            size_t index = state & mask;
+
+            value ^= buffer[index];
+            buffer[index] = value;
+        }
     }
 }
 

@@ -21,7 +21,7 @@ g++ sorting.cpp -std=c++17 -O2 -pthread -o "$SORTING_EXE"
 
 ALGORITHMS=(heap merge quick)
 STRESSES=(none cpu ram both)
-SIZES=(4 5 6 7)
+SIZES=(8)
 REPS=(1 2 3 4 5)
 
 for rep in "${REPS[@]}"; do
