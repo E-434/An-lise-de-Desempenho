@@ -186,7 +186,8 @@ void runCpuStress(std::atomic<bool>& running)
 //Aplica estresse em RAM enquanto o sorting estiver sendo executado
 void runRamStress(std::atomic<bool>& running)
 {
-    constexpr size_t chunkSize = 512ULL * 1024ULL * 1024ULL;
+    constexpr size_t chunkSize = 4ULL * 1024ULL * 1024ULL * 1024ULL;
+    //constexpr size_t chunkSize = 512ULL * 1024ULL * 1024ULL;
     constexpr size_t mask = chunkSize - 1;
 
     std::vector<unsigned char> buffer(chunkSize, 0);
@@ -217,19 +218,29 @@ void startStress(StressLevel level, atomic<bool>& running, vector<thread>& worke
     if (level == StressLevel::None)
         return;
 
+    unsigned int numThreads = std::thread::hardware_concurrency();
+    if (numThreads == 0) numThreads = 32; // fallback
+
     if (level == StressLevel::Cpu || level == StressLevel::Both)
     {
-        workers.emplace_back([&]() {
-            runCpuStress(running);
-        });
+        for (unsigned int i = 0; i < numThreads; i++)
+        {
+            workers.emplace_back([&]() {
+                runCpuStress(running);
+            });
+        }
     }
 
     if (level == StressLevel::Ram || level == StressLevel::Both)
+{
+    unsigned int ramThreads = 8; // ajuste conforme RAM disponível
+    for (unsigned int i = 0; i < ramThreads; i++)
     {
         workers.emplace_back([&]() {
             runRamStress(running);
         });
     }
+}
 }
 
 //Para as threads de estresse ao final da execução do sorting
