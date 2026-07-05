@@ -166,13 +166,14 @@ string stressLevelToString(StressLevel level)
 }
 
 //Aplica estresse em CPU enquanto o sorting estiver sendo executado
-void runCpuStress(std::atomic<bool>& running)
+void runCpuStress(std::atomic<bool>& running, std::atomic<int>& readyCounter)
 {
     volatile double x = 1.1;
 
+    readyCounter++; // avisa que essa thread já começou a rodar
+
     while (running)
     {
-        //Executa operações aritméticas simples para consumir CPU durante o sorting
         x *= 1.0000001;
         x /= 1.00000009;
         x += 0.1234;
@@ -184,63 +185,73 @@ void runCpuStress(std::atomic<bool>& running)
 }
 
 //Aplica estresse em RAM enquanto o sorting estiver sendo executado
-void runRamStress(std::atomic<bool>& running)
+void runRamStress(std::atomic<bool>& running, const float carga, std::atomic<bool>& ready)
 {
-    constexpr size_t chunkSize = 4ULL * 1024ULL * 1024ULL * 1024ULL;
-    //constexpr size_t chunkSize = 512ULL * 1024ULL * 1024ULL;
-    constexpr size_t mask = chunkSize - 1;
+    const size_t bytesAlvo = static_cast<size_t>(
+        32ULL * 1024ULL * 1024ULL * 1024ULL * carga
+    );
 
-    std::vector<unsigned char> buffer(chunkSize, 0);
+    std::vector<unsigned char> buffer(bytesAlvo, 0); // aloca e zera aqui
+
+    ready = true; // sinaliza que já pode começar a cronometrar
 
     uint64_t state = 0x123456789ABCDEFULL;
     unsigned char value = 0;
 
     while (running)
     {
-        //Realiza leituras e escritas em um buffer grande para aumentar o uso de RAM
         for (int i = 0; i < 8; i++)
         {
             state ^= state << 13;
             state ^= state >> 7;
             state ^= state << 17;
-
-            size_t index = state & mask;
-
+            size_t index = state % bytesAlvo;
             value ^= buffer[index];
             buffer[index] = value;
         }
     }
 }
 
+unsigned int cpuStressThreadCount(float carga)
+{
+    unsigned int hw = std::thread::hardware_concurrency();
+    if (hw == 0) hw = 32;                                    // fallback
+    unsigned int n = static_cast<unsigned int>(hw * carga + 0.5f); // arredonda
+    return n < 1u ? 1u : n;                                  // pelo menos 1
+}
+
 //Inicia as threads de estresse conforme o nível escolhido
-void startStress(StressLevel level, atomic<bool>& running, vector<thread>& workers)
+void startStress(StressLevel level, atomic<bool>& running, vector<thread>& workers,
+                 float carga, atomic<bool>& ramReady, atomic<int>& cpuReadyCount)
 {
     if (level == StressLevel::None)
         return;
 
-    unsigned int numThreads = std::thread::hardware_concurrency();
-    if (numThreads == 0) numThreads = 32; // fallback
+    // 1) RAM primeiro: aloca + zera o buffer inteiro e só então libera o portão.
+    if (level == StressLevel::Ram || level == StressLevel::Both)
+    {
+        // 'carga' capturado POR VALOR. Antes era [&] -> referência pendurada,
+        // pois 'carga' é parâmetro por valor de startStress e morre no return.
+        workers.emplace_back([&running, carga, &ramReady]() {
+            runRamStress(running, carga, ramReady);
+        });
 
+        // Portão: as threads de CPU só sobem DEPOIS que a RAM terminou de alocar/zerar.
+        while (!ramReady.load())
+            std::this_thread::yield();
+    }
+
+    // 2) CPU depois da RAM pronta, agora com contagem escalada por 'carga'.
     if (level == StressLevel::Cpu || level == StressLevel::Both)
     {
+        unsigned int numThreads = cpuStressThreadCount(carga);
         for (unsigned int i = 0; i < numThreads; i++)
         {
-            workers.emplace_back([&]() {
-                runCpuStress(running);
+            workers.emplace_back([&running, &cpuReadyCount]() {
+                runCpuStress(running, cpuReadyCount);
             });
         }
     }
-
-    if (level == StressLevel::Ram || level == StressLevel::Both)
-{
-    unsigned int ramThreads = 8; // ajuste conforme RAM disponível
-    for (unsigned int i = 0; i < ramThreads; i++)
-    {
-        workers.emplace_back([&]() {
-            runRamStress(running);
-        });
-    }
-}
 }
 
 //Para as threads de estresse ao final da execução do sorting
@@ -456,6 +467,7 @@ struct Result
     double timeMs;
 
     string stress;
+    float carga;
 
     size_t ramMBmax;
     size_t ramMBmedia;
@@ -473,6 +485,7 @@ void writeCSV(ofstream& csv, const Result& r)
         << r.size<< ","
         << r.timeMs << ","
         << r.stress << ","
+        << r.carga << ","
         << r.ramMBmax << ","
         << r.ramMBmedia << ","
         << r.energyJ << ","
@@ -486,11 +499,12 @@ void writeCSV(ofstream& csv, const Result& r)
 int main(int argc, char* argv[])
 {
     //Verifica entrada correta
-    if (argc != 3 && argc != 4)
+    if (argc < 3 || argc > 5)
     {
         cerr << "Uso: ./sorts <algoritmo> <arquivo_bin> [nivel_estresse]" << endl;
         cerr << "Algoritmos válidos: heap, merge, quick" << endl;
         cerr << "Níveis de estresse válidos: none, cpu, ram, both" << endl;
+        cerr << "Carga válida: 0.25, 0.5, 0.75, 1.0 (padrão: 1.0)" << endl;
 
         return 1;
     }
@@ -501,8 +515,9 @@ int main(int argc, char* argv[])
     string algorithm = argv[1];
     string datasetPath = argv[2];
     StressLevel stressLevel = StressLevel::None;
+    float carga = 1.0f; // valor padrão
 
-    if (argc == 4)
+    if (argc >= 4)
     {
         try
         {
@@ -511,6 +526,24 @@ int main(int argc, char* argv[])
         catch (const exception& e)
         {
             cerr << e.what() << endl;
+            return 1;
+        }
+    }
+    if (argc >= 5)
+    {
+        try
+        {
+            carga = std::stof(argv[4]);
+        }
+        catch (const exception& e)
+        {
+            cerr << "Carga inválida: " << argv[4] << endl;
+            return 1;
+        }
+
+        if (carga <= 0.0f || carga > 1.0f)
+        {
+            cerr << "Carga deve estar entre 0.0 (exclusivo) e 1.0 (inclusivo)." << endl;
             return 1;
         }
     }
@@ -534,11 +567,33 @@ int main(int argc, char* argv[])
 
     cout << algorithm << " " << datasetName << " " << original.size() << endl;
     cout << "Estresse: " << stressLevelToString(stressLevel) << endl;
+    cout << "Carga: " << carga << endl;
 
     size_t avgRam = 0;
     vector<thread> stressThreads;
 
-    startStress(stressLevel, monitoring, stressThreads);
+    std::atomic<bool> ramReady(
+        stressLevel != StressLevel::Ram && stressLevel != StressLevel::Both
+    );
+
+    unsigned int numCpuThreadsExpected = 0;
+    if (stressLevel == StressLevel::Cpu || stressLevel == StressLevel::Both)
+        numCpuThreadsExpected = cpuStressThreadCount(carga);
+    std::atomic<int> cpuReadyCount(0);
+
+    startStress(stressLevel, monitoring, stressThreads, carga, ramReady, cpuReadyCount);
+
+    // espera RAM alocar/zerar (se aplicável)
+    while (!ramReady)
+    {
+        std::this_thread::yield();
+    }
+
+    // espera todas as threads de CPU já estarem rodando (se aplicável)
+    while (static_cast<unsigned int>(cpuReadyCount.load()) < numCpuThreadsExpected)
+    {
+        std::this_thread::yield();
+    }
 
     thread monitorThread([&]() {
         avgRam = getAvgMemoryUsageKB(monitoring);
@@ -586,7 +641,7 @@ int main(int argc, char* argv[])
 
     if (writeHeaderAlg)
     {
-        csv_alg << "vector_type,algorithm,size,time_ms,stress,ram_kb_max,ram_kb_media,energy_j,comparisons,swaps\n";
+        csv_alg << "vector_type,algorithm,size,time_ms,stress,carga,ram_kb_max,ram_kb_media,energy_j,comparisons,swaps\n";
     }
 
     //Struct de resultado
@@ -604,6 +659,7 @@ int main(int argc, char* argv[])
     r.timeMs = timeMs;
     r.size = original.size();
     r.stress = stressLevelToString(stressLevel);
+    r.carga = (stressLevel == StressLevel::None) ? 0.0f : carga;
     r.comparisons = g_stats.comparisons;
     r.swaps = g_stats.swaps;
     //Salva RAM usada
@@ -621,7 +677,7 @@ int main(int argc, char* argv[])
     ofstream csv_data(csvDataPath, ios::app);
     if (writeHeaderData)
     {
-        csv_data << "vector_type,algorithm,size,time_ms,stress,ram_kb_max,ram_kb_media,energy_j,comparisons,swaps\n";
+        csv_data << "vector_type,algorithm,size,time_ms,stress,carga,ram_kb_max,ram_kb_media,energy_j,comparisons,swaps\n";
     }
 
     writeCSV(csv_data, r);
@@ -632,7 +688,7 @@ int main(int argc, char* argv[])
     ofstream csv_size(csvSizePath, ios::app);
     if (writeHeaderSize)
     {
-        csv_size << "vector_type,algorithm,size,time_ms,stress,ram_kb_max,ram_kb_media,energy_j,comparisons,swaps\n";
+        csv_size << "vector_type,algorithm,size,time_ms,stress,carga,ram_kb_max,ram_kb_media,energy_j,comparisons,swaps\n";
     }
 
     writeCSV(csv_size, r);
